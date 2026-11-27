@@ -153,7 +153,13 @@ async function vet(spec, ctx) {
   if (!packument.ok || !packument.json) { unknown('npm registry; nothing was verified', packument); return finish(); }
 
   const versions = Object.keys(packument.json.versions ?? {});
-  const version = requested ?? packument.json['dist-tags']?.latest;
+  const tags = packument.json['dist-tags'] ?? {};
+  // A dist-tag (latest, next, beta, ...) resolves to the version it points at; anything else must be exact.
+  const version = requested === null ? tags.latest : (Object.hasOwn(tags, requested) ? tags[requested] : requested);
+  if (requested !== null && !Object.hasOwn(tags, requested) && !SEMVER.test(requested)) {
+    gate(`"${requested}" is neither an exact version nor a dist-tag (${Object.keys(tags).join(', ') || 'none'}); vet the exact version you will install`);
+    return finish();
+  }
   if (!version || !versions.includes(version)) {
     // Registries unpublish malicious versions, so ask OSV why a requested version is missing.
     const missing = version ? await osvQuery(name, version) : null;

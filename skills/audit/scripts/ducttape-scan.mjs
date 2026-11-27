@@ -93,6 +93,9 @@ const RULES = [
     why: 'Debug logging left in shipped code.', fix: 'Remove it or route it through the app logger at the right level.' },
   { id: 'todo-without-ticket', severity: 'warn', scope: 'code', re: /\b(TODO|FIXME|HACK|XXX)\b(?!.*([A-Z][A-Z0-9]+-\d+|#\d+|https?:\/\/))/,
     why: 'Untracked debt: nobody owns this note.', fix: 'Do it now, or link a ticket.' },
+  { id: 'shortcut-incomplete', severity: 'warn', scope: 'code', re: /(\/\/|#|\/\*)\s*shortcut:(?![^,]+,\s*\S)/i,
+    why: 'A deliberate shortcut must name its limit and when to upgrade, or it becomes invisible debt.',
+    fix: 'Write it as "shortcut: <the limit>, <when to upgrade>".' },
   { id: 'json-parse-unvalidated', severity: 'warn', scope: 'src', stripped: true, re: /\bJSON\.parse\(/,
     unless: /\b(parse|safeParse|parseAsync|safeParseAsync|assert|decode|validate|is[A-Z]\w*)\([^()]*JSON\.parse\(/,
     why: 'Parsed data is untrusted input; trusting its shape is how a bad config/data file takes down a system (CrowdStrike 2024, Cloudflare 2025).',
@@ -119,11 +122,11 @@ const RULES = [
   { id: 'index-as-key', severity: 'warn', scope: 'src', ext: new Set(['.tsx', '.jsx']), re: /key=\{\s*(index|idx|i)\s*\}|key=\{`[^`]*\$\{\s*(index|idx|i)\s*\}[^`]*`\}/,
     why: 'Array index keys break state when items are inserted, removed or reordered.',
     fix: 'Use a stable ID from the data.' },
-  { id: 'hardcoded-secret', severity: 'block', scope: 'nontest', waivable: false, re: SECRET_CODE, unless: SECRET_PLACEHOLDER,
+  { id: 'hardcoded-secret', severity: 'block', scope: 'nontest', waivable: false, re: SECRET_CODE, placeholder: SECRET_PLACEHOLDER,
     why: 'Credential committed to source.', fix: 'Move it to the platform secret store or env config, and rotate it.' },
-  { id: 'hardcoded-secret-env', severity: 'block', scope: 'nontest', waivable: false, re: SECRET_ENV, unless: SECRET_PLACEHOLDER,
+  { id: 'hardcoded-secret-env', severity: 'block', scope: 'nontest', waivable: false, re: SECRET_ENV, placeholder: SECRET_PLACEHOLDER,
     why: 'Credential committed in an environment or config file.', fix: 'Keep real values out of git (gitignored .env, EAS secrets), and rotate this one.' },
-  { id: 'secret-in-test', severity: 'warn', scope: 'test', re: SECRET_CODE, unless: SECRET_PLACEHOLDER,
+  { id: 'secret-in-test', severity: 'warn', scope: 'test', re: SECRET_CODE, placeholder: SECRET_PLACEHOLDER,
     why: 'Credential-shaped value in a test.', fix: 'Confirm it is a fake fixture; if it is real, remove and rotate it.' },
   { id: 'gate-bypass', severity: 'block', scope: 'nondoc', waivable: false,
     re: /--no-verify\b|--legacy-peer-deps\b|\bnpm\s+(i|install|ci)\b[^\n]*\s--force\b|\bHUSKY=0\b/,
@@ -260,7 +263,11 @@ function parseDiff(text) {
   for (const line of text.split('\n')) {
     if (oldLeft > 0 || newLeft > 0) {
       if (line.startsWith('+')) { current?.added.push({ n: newLine, text: line.slice(1) }); newLine += 1; newLeft -= 1; continue; }
-      if (line.startsWith('-')) { current?.removed.push({ n: oldLine, text: line.slice(1) }); oldLine += 1; oldLeft -= 1; continue; }
+      if (line.startsWith('-')) {
+        current?.removed.push({ n: oldLine, text: line.slice(1) });
+        current?.deletionAnchors.add(newLine); // Where in the new file the deletion happened.
+        oldLine += 1; oldLeft -= 1; continue;
+      }
       if (line.startsWith(' ')) { oldLine += 1; newLine += 1; oldLeft -= 1; newLeft -= 1; continue; }
       if (line.startsWith('\\')) continue; // "\ No newline at end of file"
     }
@@ -281,7 +288,7 @@ function parseDiff(text) {
 }
 
 function getEntry(files, path, deleted = false) {
-  if (!files.has(path)) files.set(path, { added: [], removed: [], deleted });
+  if (!files.has(path)) files.set(path, { added: [], removed: [], deleted, deletionAnchors: new Set() });
   return files.get(path);
 }
 
@@ -351,7 +358,8 @@ function stripLine(text, ext) {
 }
 
 function stripBlock(text) {
-  return text.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/\/\/[^\n]*/g, '').replace(/(["'`])(?:\\.|(?!\1)[^\n])*\1/g, '$1$1');
+  // Keep every newline so line numbers in the stripped text match the file.
+  return text.replace(/\/\*[\s\S]*?\*\//g, (c) => c.replace(/[^\n]/g, ' ')).replace(/\/\/[^\n]*/g, '').replace(/(["'`])(?:\\.|(?!\1)[^\n])*\1/g, '$1$1');
 }
 
 function findWaiver(fileLines, lineNumber, ruleId) {
@@ -375,15 +383,25 @@ function applyWaiver(rule, fileLines, line) {
   return { waived: reason };
 }
 
-// Group consecutive added lines into blocks so multi-line patterns (an empty catch over three lines) are seen.
-function addedBlocks(added) {
-  const blocks = [];
-  for (const entry of added) {
-    const last = blocks[blocks.length - 1];
-    if (last && entry.n === last.end + 1) { last.lines.push(entry.text); last.end = entry.n; }
-    else blocks.push({ start: entry.n, end: entry.n, lines: [entry.text] });
-  }
-  return blocks;
+// Lines of the new file the change touched: every added line, plus the lines either side of a pure deletion.
+// Multi-line rules run over the whole current file and report a match only if it overlaps a touched line, so
+// emptying an existing catch block by deleting its body is caught even though no line was added.
+function touchedLines(change) {
+  const touched = new Set(change.added.map((a) => a.n));
+  for (const n of change.deletionAnchors ?? []) { touched.add(n); touched.add(n + 1); }
+  return touched;
+}
+
+function matchesTouched(startLine, endLine, touched) {
+  for (let n = startLine; n <= endLine; n += 1) if (touched.has(n)) return true;
+  return false;
+}
+
+// Secret rules decide on the matched value, not the whole line: `process.env.KEY || "sk_live_..."` still leaks.
+function secretIsPlaceholder(rule, subject) {
+  if (!rule.placeholder) return false;
+  const match = rule.re.exec(subject);
+  return match ? rule.placeholder.test(match[0]) : false;
 }
 
 function scanFile(path, change, fileLines) {
@@ -398,21 +416,24 @@ function scanFile(path, change, fileLines) {
       const stripped = stripLine(text, ext);
       for (const rule of rules) {
         const subject = rule.stripped ? stripped : text;
-        if (!rule.re.test(subject) || (rule.unless && rule.unless.test(text))) continue;
+        if (!rule.re.test(subject) || (rule.unless && rule.unless.test(text)) || secretIsPlaceholder(rule, subject)) continue;
         const waiver = when === 'added' ? applyWaiver(rule, fileLines, n) : { waived: null };
         out.push(finding(rule, path, n, { removed: when === 'removed', ...waiver, text: text.trim().slice(0, 160) }));
       }
     }
   }
   const blockRules = BLOCK_RULES.filter((r) => scopeMatches(r, path));
-  for (const block of blockRules.length > 0 ? addedBlocks(change.added) : []) {
-    const joined = block.lines.join('\n');
-    const subject = ext === '.py' ? joined : stripBlock(joined);
+  if (blockRules.length > 0 && fileLines && !change.deleted) {
+    const touched = touchedLines(change);
+    const joined = fileLines.join('\n');
+    const subject = ext === '.py' ? joined : stripBlock(joined); // Stripping keeps newlines, so line numbers hold.
     for (const rule of blockRules) {
       rule.re.lastIndex = 0;
-      for (let m = rule.re.exec(subject), guard = 0; m && guard < 1000; m = rule.re.exec(subject), guard += 1) {
-        const line = block.start + subject.slice(0, m.index).split('\n').length - 1;
-        out.push(finding(rule, path, line, { ...applyWaiver(rule, fileLines, line), text: (block.lines[line - block.start] ?? '').trim().slice(0, 160) }));
+      for (let m = rule.re.exec(subject), guard = 0; m && guard < 10_000; m = rule.re.exec(subject), guard += 1) {
+        const start = subject.slice(0, m.index).split('\n').length;
+        const end = start + m[0].split('\n').length - 1;
+        if (!matchesTouched(start, end, touched)) continue;
+        out.push(finding(rule, path, start, { ...applyWaiver(rule, fileLines, start), text: (fileLines[start - 1] ?? '').trim().slice(0, 160) }));
       }
     }
   }
@@ -425,7 +446,8 @@ function scan(root, files) {
   const findings = [];
   for (const [path, change] of files) {
     if (SKIP_PATH.test(path)) continue;
-    const fileLines = change.added.length > 0 ? readLines(root, path) : null;
+    // Pure deletions still need the current file: removing a catch body creates an empty catch.
+    const fileLines = !change.deleted && (change.added.length > 0 || change.deletionAnchors.size > 0) ? readLines(root, path) : null;
     findings.push(...scanFile(path, change, fileLines));
     if (findings.length > MAX_FINDINGS) return { findings: findings.slice(0, MAX_FINDINGS), truncated: true };
   }

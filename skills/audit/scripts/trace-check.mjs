@@ -15,7 +15,9 @@
 // IDs carry a per-plan key so plans in one repo never collide: REQ-PLAY-001, HAZ-PLAY-001, INV-PLAY-001.
 //
 // Usage:
-//   node trace-check.mjs <plan.md> [--root <repo dir>] [--log <log.md>] [--through P2] [--strict] [--structure-only]
+//   node trace-check.mjs <plan.md> [--root <repo dir>] [--log <log.md>] [--through P2] [--report <jest.json>] [--strict] [--structure-only]
+// --report f.json  count only tests that passed in a Jest/Vitest JSON report (authoritative; without it, test files
+//                  are read statically, skipping .todo/.skip/x-prefixed tests and tests inside describe.skip blocks)
 // --through Pn     check only requirements delivered in phases P1..Pn (phase exit)
 // --strict         also fail on orphan test references and Class 3+ plans without invariants (audit)
 // --structure-only check the plan alone, before any tests exist
@@ -40,7 +42,11 @@ const PHASE_CELL = /^P\d+(\s*[,/+-]\s*P\d+)*$/;
 // A test title: it(...) / test(...) with optional .each(...)/.prop(...)/.concurrent/.failing modifiers.
 const TEST_TITLE = /\b(?:it|test)(?:\.(?:each|prop|concurrent|failing)(?:\s*\((?:[^()]|\([^()]*\))*\))?)*\s*\(\s*(['"`])((?:\\.|(?!\1)[\s\S])*?)\1/g;
 const EVIDENCE = /^\s*[-*]?\s*EVIDENCE\s+(REQ-[A-Z][A-Z0-9]{1,7}-\d{3})\s+\[([TAID\s+,/]+)\]\s*:\s*(.*?)\s*->\s*(.*?)\s*$/;
-const NOT_DONE = /\b(pending|not yet|todo|tbd|n\/?a|to be done|later|unverified|not verified)\b/i;
+// An observation that *starts* with one of these is a placeholder. "audio resumed 2 s later" is real evidence.
+const NOT_DONE = /^\s*(pending|not yet|not done|todo|to do|tbd|n\/?a|to be done|later|unverified|not verified|will\b)/i;
+// Blocks whose tests never run: their titles must not count as traces.
+const SKIPPED_BLOCK = /\b(?:describe|context|suite)\.(?:skip|todo)\s*\(|\bx(?:describe|context)\s*\(/g;
+const MAX_SCAN_CHARS = 2_000_000;
 
 function fail(message) {
   process.stderr.write(`trace-check: ${message}\n`);
@@ -48,12 +54,12 @@ function fail(message) {
 }
 
 function parseArgs(argv) {
-  const opts = { plan: null, root: process.cwd(), log: null, strict: false, structureOnly: false, through: null };
+  const opts = { plan: null, root: process.cwd(), log: null, strict: false, structureOnly: false, through: null, report: null };
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
     if (arg === '--strict') opts.strict = true;
     else if (arg === '--structure-only') opts.structureOnly = true;
-    else if (arg === '--root' || arg === '--log' || arg === '--through') {
+    else if (arg === '--root' || arg === '--log' || arg === '--through' || arg === '--report') {
       const value = argv[i + 1];
       if (!value) fail(`${arg} needs a value`);
       opts[arg.slice(2)] = value;
@@ -171,14 +177,47 @@ function stripComments(source) {
   return source.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/(^|[^:'"`\\])\/\/[^\n]*/g, '$1');
 }
 
-// IDs named by real tests in one file. JS/TS: only it/test titles. Python/Go: only test definition lines.
-// E2E flow files (Maestro YAML) are whole tests, so any ID in them counts.
+// Index of the parenthesis that closes the one at `open`, skipping string and template literals.
+// Approximate (no regex-literal handling) and bounded; returns the end of the text if unbalanced.
+function closingParen(code, open) {
+  let depth = 0;
+  let quote = null;
+  const limit = Math.min(code.length, open + MAX_SCAN_CHARS);
+  for (let i = open; i < limit; i += 1) {
+    const ch = code[i];
+    if (quote) {
+      if (ch === '\\') i += 1;
+      else if (ch === quote) quote = null;
+      continue;
+    }
+    if (ch === '"' || ch === "'" || ch === '`') quote = ch;
+    else if (ch === '(') depth += 1;
+    else if (ch === ')') { depth -= 1; if (depth === 0) return i; }
+  }
+  return limit;
+}
+
+function skippedRanges(code) {
+  const ranges = [];
+  for (const m of code.matchAll(SKIPPED_BLOCK)) {
+    const open = m.index + m[0].length - 1;
+    ranges.push([m.index, closingParen(code, open)]);
+  }
+  return ranges;
+}
+
+// IDs named by real tests in one file. JS/TS: only it/test titles outside skipped describe blocks.
+// Python/Go: only test definition lines. E2E flow files (Maestro YAML) are whole tests, so any ID in them counts.
 function idsInTestFile(file, source) {
   const ext = extname(file).toLowerCase();
   const ids = new Set();
   if (JS_EXT.has(ext)) {
     const code = stripComments(source);
-    for (const m of code.matchAll(TEST_TITLE)) for (const id of m[2].match(ID_RE) ?? []) ids.add(id);
+    const skipped = skippedRanges(code);
+    for (const m of code.matchAll(TEST_TITLE)) {
+      if (skipped.some(([start, end]) => m.index > start && m.index < end)) continue;
+      for (const id of m[2].match(ID_RE) ?? []) ids.add(id);
+    }
   } else if (ext === '.py' || ext === '.go') {
     for (const line of source.split(/\r?\n/)) {
       if (!/^\s*(def\s+test|func\s+Test)/.test(line)) continue;
@@ -200,6 +239,28 @@ function collectTestRefs(root, files) {
     }
   }
   return refs;
+}
+
+// Authoritative mode: a Jest or Vitest JSON report (`--json --outputFile=x`, or Vitest's json reporter).
+// Only tests that actually ran and passed count, which settles skips, todos and conditional tests for good.
+function collectReportRefs(root, reportPath) {
+  let report;
+  try { report = JSON.parse(readFileSync(reportPath, 'utf8')); } catch (error) { fail(`cannot read test report ${reportPath}: ${error.message}`); }
+  if (!Array.isArray(report?.testResults)) fail(`${reportPath} is not a Jest/Vitest JSON report (no testResults array)`);
+  const refs = new Map();
+  let passed = 0;
+  for (const suite of report.testResults) {
+    const file = suite.name ? relative(root, suite.name).replace(/\\/g, '/') : '(unknown file)';
+    for (const test of suite.assertionResults ?? []) {
+      if (test.status !== 'passed') continue;
+      passed += 1;
+      for (const id of `${test.title ?? ''} ${test.fullName ?? ''}`.match(ID_RE) ?? []) {
+        if (!refs.has(id)) refs.set(id, new Set());
+        refs.get(id).add(file);
+      }
+    }
+  }
+  return { refs, passed };
 }
 
 function collectEvidence(logText) {
@@ -238,11 +299,13 @@ function main() {
     return;
   }
 
-  const testFiles = findTestFiles(opts.root);
-  const refs = collectTestRefs(opts.root, testFiles);
+  const testFiles = opts.report ? [] : findTestFiles(opts.root);
+  const fromReport = opts.report ? collectReportRefs(opts.root, opts.report) : null;
+  const refs = fromReport ? fromReport.refs : collectTestRefs(opts.root, testFiles);
+  const source = fromReport ? `${fromReport.passed} passing tests in ${opts.report}` : `${testFiles.length} test files scanned (static; pass --report for passing tests only)`;
   const { evidence, malformed } = collectEvidence(existsSync(opts.log) ? readFileSync(opts.log, 'utf8') : '');
   const errors = [...structural];
-  const warnings = malformed.map((l) => `EVIDENCE line ignored (needs "<method> -> <observed result>", and no "pending"/"not yet"): ${l}`);
+  const warnings = malformed.map((l) => `EVIDENCE line ignored (needs "<method> -> <observed result>", and the result cannot start with "pending", "not yet", "TODO" or similar): ${l}`);
   const traced = [];
   const inScope = (req) => opts.through === null || (req.phase !== null && req.phase <= opts.through);
 
@@ -266,7 +329,7 @@ function main() {
   }
 
   const scope = opts.through === null ? 'all phases' : `phases P1-P${opts.through}`;
-  process.exitCode = render([`trace-check: key ${plan.key}, class ${plan.cls ?? '?'}, ${scope}: ${plan.reqs.size} requirements, ${plan.hazards.size} hazards, ${testFiles.length} test files scanned`,
+  process.exitCode = render([`trace-check: key ${plan.key}, class ${plan.cls ?? '?'}, ${scope}: ${plan.reqs.size} requirements, ${plan.hazards.size} hazards, ${source}`,
     `  ${traced.length} requirements traced to tests`], errors, warnings, traced);
 }
 

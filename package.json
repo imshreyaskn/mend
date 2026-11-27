@@ -1,0 +1,10 @@
+{
+  "name": "mend",
+  "private": true,
+  "type": "module",
+  "description": "Tests for the mend skill scripts. The scripts themselves have no dependencies.",
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "test": "node --test \"test/*.test.mjs\""
+  }
+}

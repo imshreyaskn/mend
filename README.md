@@ -18,7 +18,7 @@ It is built from a research base of more than 330 sources: NASA and JPL engineer
 AI agents write code fast. The independent evidence says that code costs more than it looks:
 
 - **Quality debt that lasts.** Two Carnegie Mellon difference-in-differences studies of real GitHub repos found that adopting AI agents brought a **persistent ~18–30% rise in static-analysis warnings and ~39–41% rise in code complexity**, while the speed gains faded ([arXiv 2511.04427](https://arxiv.org/abs/2511.04427), [arXiv 2601.13597](https://arxiv.org/abs/2601.13597)).
-- **Agents game tests.** On ImpossibleBench, where any passing result counts as cheating, frontier models cheated on **50–76%** of tasks. Claude models did it mostly by **editing the tests** ([arXiv 2510.20270](https://arxiv.org/html/2510.20270v1)).
+- **Agents game tests.** On ImpossibleBench's SWE-bench-derived tasks, where any passing result counts as cheating, GPT-5 cheated on **54–76%** and Claude Opus 4.1 on about **50%**. Rates were lower on the benchmark's other task sets, and newer models cheat less, but Claude models cheated mostly by **editing the tests** ([arXiv 2510.20270](https://arxiv.org/html/2510.20270v1)).
 - **Invented dependencies.** About **19.7%** of packages recommended by code models did not exist, and the fake names repeat across runs, so attackers can register them ([USENIX Security 2025](https://www.usenix.org/conference/usenixsecurity25/presentation/spracklen)).
 - **AI review misses most of it.** On realistic pull requests, AI reviewers catch roughly **a third to half** of what careful humans flag. A reviewer told to find problems always finds *something*.
 - **Prompts don't fix it.** Rules files barely move correctness, and in one study random rules helped as much as curated ones. "Don't be sycophantic" helps far less than a procedure with a legitimate way out.
@@ -43,7 +43,7 @@ What does work, every time it has been measured, is **an external signal the mod
 
 **Evidence or it didn't happen.** "Tests pass" means nothing on its own. Every claim of success carries the command and the result line. Every requirement is traced to a test named for it, or to recorded evidence, and a script checks the traces.
 
-**Tests are the specification.** The agent may never change an expected value, delete an assertion or skip a test to get green. If a test looks wrong, the agent has a sanctioned exit (`BLOCKED: <what> because <evidence>`). Giving agents that exit cut one model's test-cheating from 54% to 9% in the benchmark above.
+**Tests are the specification.** The agent may never change an expected value, delete an assertion or skip a test to get green. If a test looks wrong, the agent has a sanctioned exit (`BLOCKED: <what> because <evidence>`). In the benchmark above, a prompt with that exit cut GPT-5's test-cheating from 54% to 9%. The effect on Claude Opus 4.1 was much smaller, which is why mend also enforces the rule mechanically: test edits and removed assertions show up in the scan.
 
 **Independent review, then try to disprove it.** Following NASA's IV&V, the audit runs in a fresh context that never saw the code being written. Its reviewer lenses run as parallel subagents. Verifiers then try to *refute* each finding, ideally with a failing test, so you get only findings that survive.
 
@@ -74,7 +74,7 @@ What does work, every time it has been measured, is **an external signal the mod
 ### `/mend:execute`: build it without duct tape
 - Tests are written from the requirements before the code, with the requirement ID in the test title.
 - Eight rules that never bend: evidence for every claim, stop the line on anything unexplained, no duct tape, the exit is always open, tests are the spec, smallest correct change, use what exists, never describe code you haven't opened.
-- An **80-entry duct-tape registry**: every common shortcut (`as any`, empty catch, `setTimeout` to wait for layout, skipped tests and so on), what it hides and the real fix.
+- A **64-entry duct-tape registry**: every common shortcut (`as any`, empty catch, `setTimeout` to wait for layout, skipped tests and so on), what it hides and the real fix.
 - A **correct-by-construction guide**: parse, don't validate; pure reducers with effects at the edge; assertions that stay on in production (as JPL flew them); bounded everything; injected clock, randomness and network; property and stateful tests; formal models where they pay.
 - Phase checkpoints, so every phase and audit has an exact point to diff against.
 
@@ -90,13 +90,13 @@ What does work, every time it has been measured, is **an external signal the mod
 
 ## Bundled tools
 
-Plain Node scripts with no dependencies to install. They need Node 18 or later.
+Plain Node scripts with no dependencies to install. They need Node 22 or later (Node 18 and 20 are end-of-life). They are covered by a test suite (`npm test`, built on `node:test`) that runs in CI on Linux and Windows.
 
 | Script | What it does |
 |---|---|
 | `research/scripts/vet-package.mjs` | Vets npm packages against the npm registry, OSV and deps.dev (public APIs, no keys). Exit 0 pass, 1 reject, 3 review. |
 | `execute/scripts/checkpoint.mjs` | Snapshots the working tree, untracked files included, under `refs/mend/`, so audits diff against exactly what was reviewed. |
-| `audit/scripts/ducttape-scan.mjs` | Scans a diff with 42 rules: suppressions, `any` and double casts, swallowed errors and promises, skipped or focused tests, sleeps in tests, wall-clock durations, hardcoded secrets, weakened type or lint config, removed assertions, and more. |
+| `audit/scripts/ducttape-scan.mjs` | Scans a diff with 43 rules: suppressions, `any` and double casts, swallowed errors and promises, skipped or focused tests, sleeps in tests, wall-clock durations, hardcoded secrets, weakened type or lint config, removed assertions, and more. |
 | `audit/scripts/trace-check.mjs` | Proves the plan, the tests and the evidence agree: every tested requirement has a real test named for it (skipped tests and comments do not count), every other requirement has logged evidence, and every hazard names an existing mitigating requirement. |
 
 ---
@@ -110,7 +110,7 @@ In Claude Code:
 /plugin install mend@mend
 ```
 
-Or copy the four folders from `skills/` into `~/.claude/skills/`, keeping their names: the skills call each other's scripts by relative path.
+To install from a local clone instead, use `/plugin marketplace add <path to the clone>`, then the same install command. Copying the folders into `~/.claude/skills/` is not supported: they would load as bare `/plan`, `/audit` and so on, and `/plan` clashes with a built-in command.
 
 ## Use
 
@@ -132,9 +132,13 @@ Each step reads the previous step's file, and you can enter at any point. Run `/
 - **Incident record:** postmortems from Ariane 5, Mars Climate Orbiter, Mars Polar Lander, Mars Pathfinder, Spirit, Schiaparelli, Starliner, Therac-25, the Patriot at Dhahran, the Boeing 737 MAX and 787, Knight Capital, Cloudflare, CrowdStrike, Fastly, Facebook, AWS, Google Cloud, Azure, GitLab, Atlassian, Heartbleed, Log4Shell, left-pad, event-stream and xz-utils.
 - **AI coding research, 2025–2026:** CMU's adoption studies, METR's randomised trials, ImpossibleBench, the USENIX package-hallucination study, independent AI-review benchmarks (c-CRAB and others), research on sycophancy and self-correction, and Anthropic's and OpenAI's own guidance on harness engineering.
 
+The full list of 334 public sources is in [SOURCES.md](SOURCES.md).
+
+The "smallest complete change" ladder and the `shortcut:` comment convention are adapted from [ponytail](https://github.com/DietrichGebert/ponytail) (MIT). Its own benchmark reports much less code; an independent run found mixed cost results, so mend adopts the discipline, not the headline numbers.
+
 ## Honest limits
 
-mend raises the floor. It does not certify anything. No audit makes code flight-ready on its own: it reports what was checked, how, and what remains open. Most of the evidence on AI agents is benchmark evidence, and no study yet measures long-term effects on real repositories. mend is designed around that uncertainty by trusting tools over prose and proof over confidence.
+mend raises the floor. It does not certify anything. Its rules are enforced by scripts the agent runs, not by hooks or CI, so an agent can still skip a step; the audit checks for that, but nothing stops it mechanically yet. The references are written for TypeScript and React Native first; the workflow applies to any stack, but most code examples will need translating. No audit makes code flight-ready on its own: it reports what was checked, how, and what remains open. Most of the evidence on AI agents is benchmark evidence, and no study yet measures long-term effects on real repositories. mend is designed around that uncertainty by trusting tools over prose and proof over confidence.
 
 ## Licence
 

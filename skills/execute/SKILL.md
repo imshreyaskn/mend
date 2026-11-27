@@ -17,7 +17,17 @@ Input: `$ARGUMENTS`, a plan path, a phase, or a task. Plans live at `.mend/<slug
 3. **No duct tape.** Nothing that makes a symptom disappear without making the system correct. The catalogue of shortcuts and their real fixes is in [references/duct-tape-registry.md](references/duct-tape-registry.md). Read it before your first edit. If the real fix is out of scope, stop and report. Never tape.
 4. **The exit is always open.** If a test, requirement or plan step looks wrong, write `BLOCKED: <what is wrong> because <evidence>` and stop. Do not work around it. Agents that are given this exit cheat on tests far less (in one benchmark, GPT-5's cheating fell from 54% to 9%), and a blocked report is a success, not a failure.
 5. **Tests are the specification.** Never change an expected value, delete an assertion, or skip a test to make code pass. A test changes only when a requirement changes. In an approved plan, a requirement changes only with the user's OK, logged as a `CHANGE` line.
-6. **Smallest correct change.** No unrelated refactors, no speculative abstractions, no "while I'm here". Deleting code is welcome. Tidying goes in its own step, separate from behaviour changes.
+6. **Smallest complete change.** Before writing code, stop at the first rung that holds:
+   1. Does this need to exist at all? If nothing in the requirements asks for it, skip it and say so in one line.
+   2. Does this codebase already have it? Use it the way the surrounding code does.
+   3. Does the language, runtime or framework provide it? Use that.
+   4. Does an installed dependency do it? Use that.
+   5. Can it be one line a reader understands at a glance? Write one line.
+   6. Only then: the least code that works.
+
+   Be lazy about the solution, never about the change. Before editing a function, grep every caller, and finish everything the change breaks: callers, tests, fixtures, config. No unrelated refactors, no "for later" options or wrappers, no "while I'm here". Deleting code is welcome. Tidying goes in its own step, separate from behaviour changes.
+
+   **Never cut:** validation at trust boundaries, handling that prevents data loss, security, accessibility, or anything the requirements ask for. A deliberate shortcut with a known limit gets a comment `shortcut: <the limit>, <when to upgrade>` so it stays visible; the scan flags a shortcut comment that names no upgrade condition. (The ladder and the shortcut convention are adapted from ponytail.)
 7. **Use what exists.** Before writing a helper, search the codebase and the platform for one. Before adding a dependency, vet it: `node "${CLAUDE_SKILL_DIR}/../research/scripts/vet-package.mjs" <name>`. Exit 1 is REJECT, 3 is REVIEW, and only 0 is a pass. For Class 3 and 4, ask the user before adding any dependency the plan did not name.
 8. **Never describe code you have not opened.** Read it first.
 

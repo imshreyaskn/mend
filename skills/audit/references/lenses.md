@@ -75,6 +75,7 @@ Your lens: is this the simplest correct design, and does it reuse what already e
    - configuration nobody needs
    - states that could be unrepresentable but are not
 6. For each finding, name the simpler alternative concretely.
+7. End with a delete-list: the lines, files or abstractions that could be removed with no requirement losing coverage. Code that serves no requirement is a finding even if it works.
 ```
 
 ## Lens D: adversary (Class 4)
