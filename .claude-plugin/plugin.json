@@ -1,0 +1,10 @@
+{
+  "name": "mend",
+  "version": "0.1.0",
+  "description": "High-assurance software workflow for Claude Code: research, plan, execute and audit changes with criticality classes, traceable requirements and independent review.",
+  "author": { "name": "imshreyaskn", "url": "https://github.com/imshreyaskn" },
+  "homepage": "https://github.com/imshreyaskn/mend",
+  "repository": "https://github.com/imshreyaskn/mend",
+  "license": "MIT",
+  "keywords": ["skills", "code-review", "audit", "planning", "high-assurance"]
+}

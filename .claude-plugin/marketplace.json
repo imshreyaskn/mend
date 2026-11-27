@@ -1,0 +1,11 @@
+{
+  "name": "mend",
+  "owner": { "name": "imshreyaskn", "url": "https://github.com/imshreyaskn" },
+  "plugins": [
+    {
+      "name": "mend",
+      "source": "./",
+      "description": "Research, plan, execute and audit software changes to a high-assurance standard."
+    }
+  ]
+}
