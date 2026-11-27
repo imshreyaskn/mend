@@ -20,7 +20,7 @@
 // Exit codes: 0 no blocking findings, 1 blocking findings, 2 usage, environment or internal error.
 
 import { execFileSync } from 'node:child_process';
-import { existsSync, readFileSync, statSync } from 'node:fs';
+import { existsSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import { extname, isAbsolute, join, relative, resolve } from 'node:path';
 import process from 'node:process';
 
@@ -304,7 +304,9 @@ function collectChanges(root, opts) {
   const files = new Map();
   if (opts.files) {
     for (const input of opts.files) {
-      const abs = resolve(process.cwd(), input);
+      // Real paths on both sides: Windows temp dirs can use 8.3 short names (RUNNER~1) that git reports in long form.
+      const given = resolve(process.cwd(), input);
+      const abs = existsSync(given) ? realpathSync.native(given) : given;
       const rel = relative(root, abs).replace(/\\/g, '/');
       if (rel.startsWith('..') || isAbsolute(rel)) throw new UsageError(`${input} is outside the repository`);
       const lines = readLines(root, rel);
@@ -488,7 +490,8 @@ function report({ findings, truncated }, base, unreadable, json) {
 
 function main() {
   const opts = parseArgs(process.argv.slice(2));
-  const root = tryGit(['rev-parse', '--show-toplevel'], process.cwd());
+  const top = tryGit(['rev-parse', '--show-toplevel'], process.cwd());
+  const root = top && existsSync(top) ? realpathSync.native(top) : top;
   if (!root) throw new UsageError('not inside a git repository');
   const { files, base, unreadable = [] } = collectChanges(root, opts);
   const blocking = report(scan(root, files), base, unreadable, opts.json);
